@@ -23,8 +23,13 @@ OUT_FOLDER = ../../../build/gcc/
 # Resource file
 RES_FILE = cam2web.rc
 RES_OBJECT = cam2web.res 
+
 # Default target
-all: $(APP)
+all: $(OUT_FOLDER) $(APP)
+
+# Ensure output directory exists
+$(OUT_FOLDER):
+	mkdir -p $(OUT_FOLDER)
 
 # Rule to compile the resource file
 $(RES_OBJECT): $(RES_FILE)
