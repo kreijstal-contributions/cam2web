@@ -109,7 +109,11 @@ copyweb:
 	cp ../../../externals/jquery/*.css $(OUT_WEB)
 	cp -r $(OUT_WEB) .
 
-generateweb:
+# Rule to build web2h if it doesn’t already exist
+web2h:
+	$(MAKE) -C ../../tools/web2h/make/gcc/
+
+generateweb: web2h
 	mkdir -p $(OUT_INC)
 	cp ../../web/* $(OUT_INC)
 	cp ../../../externals/jquery/*.js $(OUT_INC)

@@ -23,11 +23,21 @@
 #include <unistd.h>
 #include <signal.h>
 #include <pwd.h>
-#include <linux/limits.h>
 #include <map>
 
-#include "XV4LCamera.hpp"
-#include "XV4LCameraConfig.hpp"
+#ifdef RASPBERRY_PI
+    #include "XRaspiCamera.hpp"
+    #include "XRaspiCameraConfig.hpp"
+    #define STR_INFO_PLATFORM       "RaspberryPi"
+    #define DEVICE_NAME             "RaspberryPi Camera"
+#else
+    #include <linux/limits.h>
+    #include "XV4LCamera.hpp"
+    #include "XV4LCameraConfig.hpp"
+    #define STR_INFO_PLATFORM       "Linux"
+    #define DEVICE_NAME             "Video for Linux Camera"
+#endif
+
 #include "XWebServer.hpp"
 #include "XVideoSourceToWeb.hpp"
 #include "XObjectConfigurationSerializer.hpp"
@@ -53,26 +63,29 @@ using namespace std;
 // Information provided on version request
 #define STR_INFO_PRODUCT        "cam2web"
 #define STR_INFO_VERSION        "1.1.0"
-#define STR_INFO_PLATFORM       "Linux"
 
-// Name of the device and default title of the camera
-const char* DEVICE_NAME = "Video for Linux Camera";
 
 XManualResetEvent ExitEvent;
 
 // Different application settings
 struct
 {
+#ifndef RASPBERRY_PI
     uint32_t DeviceNumber;
+#endif
     uint32_t FrameWidth;
     uint32_t FrameHeight;
     uint32_t FrameRate;
+#ifdef RASPBERRY_PI
+    uint32_t JpegQuality;
+#endif
     uint32_t WebPort;
     string   HtRealm;
     string   HtDigestFileName;
     string   CameraConfigFileName;
     string   CustomWebContent;
     string   CameraTitle;
+
     UserGroup ViewersGroup;
     UserGroup ConfigGroup;
 }
@@ -106,11 +119,13 @@ public:
 // Set default values for settings
 void SetDefaultSettings( )
 {
-    Settings.DeviceNumber = 0;
-    Settings.FrameWidth   = 640;
-    Settings.FrameHeight  = 480;
-    Settings.FrameRate    = 30;
-    Settings.WebPort      = 8000;
+    Settings.FrameWidth  = 640;
+    Settings.FrameHeight = 480;
+    Settings.FrameRate   = 30;
+#ifdef RASPBERRY_PI
+    Settings.JpegQuality = 10;
+#endif
+    Settings.WebPort     = 8000;
 
     Settings.HtRealm = "cam2web";
     Settings.HtDigestFileName.clear( );
@@ -118,12 +133,16 @@ void SetDefaultSettings( )
     Settings.ViewersGroup = UserGroup::Anyone;
     Settings.ConfigGroup  = UserGroup::Anyone;
 
+#ifndef RASPBERRY_PI
     struct passwd* pwd = getpwuid( getuid( ) );
     if ( pwd )
     {
         Settings.CameraConfigFileName  = pwd->pw_dir;
         Settings.CameraConfigFileName += "/.cam_config";
     }
+#else
+    Settings.CameraConfigFileName = "/home/pi/.cam_config";
+#endif
 
 #ifdef NDEBUG
     Settings.CustomWebContent.clear( );
@@ -138,8 +157,13 @@ void SetDefaultSettings( )
 // Parse command line and override default settings
 bool ParseCommandLine( int argc, char* argv[] )
 {
+#ifdef RASPBERRY_PI
+    static const uint32_t SupportedWidth[]  = { 320, 480, 640, 800, 1120, 720, 1280, 1920 };
+    static const uint32_t SupportedHeight[] = { 240, 360, 480, 600, 840, 405, 720, 1080 };
+#else
     static const uint32_t SupportedWidth[]  = { 320, 480, 640, 800, 960, 1120, 1600, 1920, 2048, 2592, 3264, 3840, 4224 };
     static const uint32_t SupportedHeight[] = { 240, 360, 480, 600, 720, 840,  1200, 1080, 1536, 1944, 2448, 2160, 3156 };
+#endif
     static const map<string, UserGroup> SupportedUserGroups =
     {
         { "any",    UserGroup::Anyone   },
@@ -171,6 +195,7 @@ bool ParseCommandLine( int argc, char* argv[] )
         if ( ( key.empty( ) ) || ( value.empty( ) ) )
             break;
 
+#ifndef RASPBERRY_PI
         if ( key == "dev" )
         {
             int scanned = sscanf( value.c_str( ), "%u", &(Settings.DeviceNumber) );
@@ -178,8 +203,16 @@ bool ParseCommandLine( int argc, char* argv[] )
             if ( scanned != 1 )
                 break;
         }
-        else if ( key == "size" )
+        else
+#endif 
+        if ( key == "size" )
         {
+#ifdef RASPBERRY_PI
+            int v = value[0] - '0';
+
+            if ( ( v < 0 ) || ( v > 7 ) )
+                break;
+#else
             int size_index;
 
             int scanned = sscanf( value.c_str( ), "%u", &size_index );
@@ -189,9 +222,10 @@ bool ParseCommandLine( int argc, char* argv[] )
 
             if ( ( size_index < 0 ) || ( size_index > 12 ) )
                 break;
+#endif
 
-            Settings.FrameWidth  = SupportedWidth[size_index];
-            Settings.FrameHeight = SupportedHeight[size_index];
+            Settings.FrameWidth  = SupportedWidth[v];
+            Settings.FrameHeight = SupportedHeight[v];
         }
         else if ( key == "fps" )
         {
@@ -203,6 +237,20 @@ bool ParseCommandLine( int argc, char* argv[] )
             if ( ( Settings.FrameRate < 1 ) || ( Settings.FrameRate > 30 ) )
                 Settings.FrameRate = 30;
         }
+#ifdef RASPBERRY_PI
+        else if ( key == "jpeg" )
+        {
+            int scanned = sscanf( value.c_str( ), "%u", &(Settings.JpegQuality) );
+
+            if ( scanned != 1 )
+                break;
+
+            if ( Settings.JpegQuality < 1 )
+                Settings.JpegQuality = 1;
+            if ( Settings.JpegQuality > 100 )
+                Settings.JpegQuality = 100;
+        }
+#endif
         else if ( key == "port" )
         {
             int scanned = sscanf( value.c_str( ), "%u", &(Settings.WebPort) );
@@ -294,8 +342,21 @@ bool ParseCommandLine( int argc, char* argv[] )
         printf( "cam2web - streaming camera to web \n" );
         printf( "Version: %s \n\n", STR_INFO_VERSION );
         printf( "Available command line options: \n" );
+#ifndef RASPBERRY_PI
         printf( "  -dev:<num>   Sets video device number to use. \n" );
         printf( "               Default is 0. \n" );
+#endif
+#ifdef RASPBERRY_PI
+        printf( "  -size:<0-7> Sets video size to one from the list below: \n" );
+        printf( "              0: 320x240 \n" );
+        printf( "              1: 480x360 \n" );
+        printf( "              2: 640x480 (default) \n" );
+        printf( "              3: 800x600 \n" );
+        printf( "              4: 1120x840 \n" );
+        printf( "              5: 720x405 \n" );
+        printf( "              6: 1280x720 \n" );
+        printf( "              7: 1920x1080 \n" );
+#else
         printf( "  -size:<0-12> Sets video size to one from the list below: \n" );
         printf( "               0: 320x240 \n" );
         printf( "               1: 480x360 \n" );
@@ -312,8 +373,13 @@ bool ParseCommandLine( int argc, char* argv[] )
         printf( "               12: 4224x3156 \n" );
         printf( "               Note: video device may switch to a different frame size, \n" );
         printf( "                     the one it supports. \n" );
+#endif
         printf( "  -fps:<1-30>  Sets camera frame rate. Same is used for MJPEG stream. \n" );
         printf( "               Default is 30. \n" );
+#ifdef RASPBERRY_PI
+        printf( "  -jpeg:<num> JPEG quantization factor (quality). \n" );
+        printf( "              Default is 10. \n" );
+#endif
         printf( "  -port:<num>  Port number for web server to listen on. \n" );
         printf( "               Default is 8000. \n" );
         printf( "  -realm:<?>   HTTP digest authentication domain. \n" );
@@ -330,7 +396,11 @@ bool ParseCommandLine( int argc, char* argv[] )
         printf( "               Default is 'any' if users file is not specified, \n" );
         printf( "               or 'admin' otherwise. \n" );
         printf( "  -fcfg:<?>    Name of the file to store camera settings in. \n" );
+#ifdef RASPBERRY_PI
+        printf( "              Default is '~/.cam_config'. \n" );
+#else
         printf( "               Default is '~/.cam_config'. \n" );
+#endif
         printf( "  -web:<?>     Name of the folder to serve custom web content. \n" );
         printf( "               By default embedded web files are used. \n" );
         printf( "  -title:<?>   Name of the camera to be shown in WebUI. \n" );
@@ -366,8 +436,13 @@ int main( int argc, char* argv[] )
     sigaction( SIGTERM, &sigIntAction, NULL );
 
     // create camera object
+#ifdef RASPBERRY_PI
+    shared_ptr<XRaspiCamera>         xcamera       = XRaspiCamera::Create( );
+    shared_ptr<IObjectConfigurator>  xcameraConfig = make_shared<XRaspiCameraConfig>( xcamera );
+#else
     shared_ptr<XV4LCamera>           xcamera       = XV4LCamera::Create( );
     shared_ptr<IObjectConfigurator>  xcameraConfig = make_shared<XV4LCameraConfig>( xcamera );
+#endif
     XObjectConfigurationSerializer   serializer( Settings.CameraConfigFileName, xcameraConfig );
 
     // some read-only information about the version
@@ -405,9 +480,13 @@ int main( int argc, char* argv[] )
     }
 
     // set camera configuration
-    xcamera->SetVideoDevice( Settings.DeviceNumber );
     xcamera->SetVideoSize( Settings.FrameWidth, Settings.FrameHeight );
     xcamera->SetFrameRate( Settings.FrameRate );
+#ifdef RASPBERRY_PI
+    xcamera->SetJpegQuality( Settings.JpegQuality );
+#else
+    xcamera->SetVideoDevice( Settings.DeviceNumber );
+#endif
 
     // restore camera settings
     serializer.LoadConfiguration( );
@@ -415,7 +494,11 @@ int main( int argc, char* argv[] )
     // add web handlers
     server.AddHandler( make_shared<XObjectInformationRequestHandler>( "/version", make_shared<XObjectInformationMap>( versionInfo ) ) ).
            AddHandler( make_shared<XObjectConfigurationRequestHandler>( "/camera/config", xcameraConfig ), configGroup ).
+#ifdef RASPBERRY_PI
+           AddHandler( make_shared<XObjectInformationRequestHandler>( "/camera/properties", make_shared<XRaspiCameraPropsInfo>( xcamera ) ), configGroup ).
+#else
            AddHandler( make_shared<XObjectInformationRequestHandler>( "/camera/properties", make_shared<XV4LCameraPropsInfo>( xcamera ) ), configGroup ).
+#endif
            AddHandler( make_shared<XObjectInformationRequestHandler>( "/camera/info", make_shared<XObjectInformationMap>( cameraInfo ) ), viewersGroup ).
            AddHandler( video2web.CreateJpegHandler( "/camera/jpeg" ), viewersGroup ).
            AddHandler( video2web.CreateMjpegHandler( "/camera/mjpeg", Settings.FrameRate ), viewersGroup );
@@ -428,7 +511,7 @@ int main( int argc, char* argv[] )
     else
     {
     #ifdef NDEBUG
-        // web content is embedded in release builds to get single executable
+    // web content is embedded in release builds to get single executable
         server.AddHandler( make_shared<XEmbeddedContentHandler>( "/", &web_index_html ), viewersGroup ).
                AddHandler( make_shared<XEmbeddedContentHandler>( "index.html", &web_index_html ), viewersGroup ).
                AddHandler( make_shared<XEmbeddedContentHandler>( "styles.css", &web_styles_css ), viewersGroup ).
@@ -465,7 +548,6 @@ int main( int argc, char* argv[] )
         }
 
         serializer.SaveConfiguration( );
-
         xcamera->SignalToStop( );
         xcamera->WaitForStop( );
         server.Stop( );
@@ -479,4 +561,3 @@ int main( int argc, char* argv[] )
 
     return 0;
 }
-
